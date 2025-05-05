@@ -1,0 +1,37 @@
+     
+     ---[  W8AN WSPR  ]---
+
+   Transmitter Calibration Procedure.
+   05may2025
+
+
+How to calibrate.
+
+Hold the BAND CHANGE button while resetting device. The WSPR transmitter will go into calibration mode. Calibration announcement will show on the OLED display
+
+The display will show a calibration frequency. On receiver, tune to that frequency. The transmitter will repeat sending 2 seconds of transmission on unbiased frequency and 1 second of biased transmission. 
+
+Write down the zero beat frequency of the 2-second transmission.
+
+Press the BAND CHANGE button to go to the next band. 
+Again, mark down the zero beat frequency of the 2-second transmission.
+
+Repeat for all 9 bands.
+
+Press the PORTAL button on the back panel to launch the configuration web server. 
+Go to the address shown on the display using computer browser. 
+Click the INFO button on the configuration page, then click the param link.
+(Alternately, go to the web address shown and add /param to the URL.)
+
+Enter the collected frequencies of the 2-second transmissions.
+
+Click the SAVE button. 
+
+Reboot the WSPR transmitter and again hold the BAND CHANGE button to enter configuaration mode.
+
+Cycle though the bands and ensure the 1-second transmission is at exactly the frequency shown on the display.
+
+When calibration is complete, reboot. 
+
+Unit is now ready for operation.
+

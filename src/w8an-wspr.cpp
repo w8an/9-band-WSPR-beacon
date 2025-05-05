@@ -27,6 +27,7 @@
 #include <SSD1306Wire.h>
 #include <Preferences.h>
 #include <WiFiManager.h>
+#include "prototypes.h"
 
 // mode defines
 #define WSPR_TONE_SPACING       146          // ~1.46 Hz
@@ -69,6 +70,12 @@ long biasHertz[10] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0};  // array of correction fre
 #define PREFS_RO             true  // preferences read-only flag
 #define PREFS_RW            false  // preferences read/write flag
 
+// data portal states
+#define PORTAL_DOWN 0           // portal is off
+#define PORTAL_UP 1             // portal is running
+#define PORTAL_SAVE 2           // data save is pending
+#define PORTAL_IDLE 4           // waiting for switch reset
+
 const char* portalName = "WSPR-PORTAL";    // portal ssid
 const char* prefs_station = "station";     // general purpose namespace in prefs
 const char* station_callsign = "callsign"; // prefs station key name
@@ -101,21 +108,14 @@ char loc[5] = "AA00";      // station maidenhead grid position (4 chars)
 char timebuf[12], freqbuf[16];
 uint8_t dbm = 3;   // 2.1mW Calculated from observed output (0.92mV p-p @ 50 ohm)
 uint8_t tx_buffer[255];
-bool call_for_portal = false;
+bool call_wifi_portal = false;
 bool calibration_mode = false;     // calibration transmit mode
 
-// function prototypes
-void encode(unsigned long);
-void calibrate(unsigned long, int);
-void set_tx_buffer(void);
-void sendNTPpacket(IPAddress &address);
-time_t getNtpTime(void);
-void getTime(void);
-void printTime(void);
-void setFreqbuf(int);
-void initFilterPins(void);
-void lowpass(uint);            
-void blinkLed();              
+// wifi and web portal objects
+WiFiManager wifiMan; 
+WiFiManagerParameter *callsign, *locator;
+WiFiManagerParameter *bias10, *bias12, *bias15, *bias17, *bias20;
+WiFiManagerParameter *bias30, *bias40, *bias80, *bias160, *biaswwv;
 
 /*
  *
@@ -132,11 +132,11 @@ void setup()
   Serial.begin(115200);  
   delay(500);      // 0.5 seconds
 
-  Serial.println("=");
+  Serial.println(F("="));
   if( digitalRead(PORTAL_PIN) == LOW ) {
     // hold the portal button on boot to launch web configuration
-    call_for_portal = true;
-    Serial.println(F("==> CONFIGURATION PORTAL"));
+    call_wifi_portal = true;
+    Serial.println(F("==> WIFI CONFIGURATION PORTAL"));
   }
   else { 
     // hold the band button on boot to launch calibration mode 
@@ -146,7 +146,7 @@ void setup()
     }
     else Serial.println(F("==> OPERATION MODE"));
   }
-  Serial.println("=");
+  Serial.println(F("="));
 
   // get station identification and grid location
   prefs.begin(prefs_station, PREFS_RO);
@@ -166,7 +166,7 @@ void setup()
   Serial.println();
   Serial.print("Station: ");
   Serial.println(call);
-  Serial.print("Locator: ");
+  Serial.print("Grid   : ");
   Serial.println(loc);
   Serial.println();
 
@@ -177,9 +177,8 @@ void setup()
   display.setFont(ArialMT_Plain_16);
   display.clear();                     
   if (calibration_mode) {
-    display.drawString(0, 0, "Calibration");
-    display.drawString(0, 20, "Mode");
-    display.drawString(0, 40, call);
+    display.drawString(0, 0, "Calibration Mode");
+    display.drawString(0, 20, call);
   }
   else {
     display.drawString(70, 0, "W8AN");
@@ -187,142 +186,77 @@ void setup()
     display.drawString(35, 20, __DATE__);
   }
   display.display();
+  delay(1000);
+
+  display.clear();
+  display.drawString(0,0,F("Config Portal"));
+  display.drawString(0,20,portalName);
+  display.drawString(0,40,F("192.168.4.1"));
+  display.display();
+
+  wifiMan.setDebugOutput(false);   // true if you want send to serial debug 
+  //--  wifiMan.resetSettings();  // force wifi set up portal
+  if(wifiMan.autoConnect(portalName)) {   // portal at 192.168.4.1
+    if (call_wifi_portal) { // user call for wifi config portal
+      // retrieve the current Wi-Fi configuration
+      wifi_config_t conf;
+      if (esp_wifi_get_config(WIFI_IF_STA, &conf) == ESP_OK) {
+        Serial.printf("SSID: %s\n", (char*)conf.sta.ssid);
+        Serial.printf("Password: %s\n", (char*)conf.sta.password);
+      } else Serial.println(F("Failed to get WiFi config"));
+      
+      display.clear();
+      display.drawString(0,0,F("Config Portal"));
+      display.drawString(0,20,portalName);
+      display.drawString(0,40,F("192.168.4.1"));
+      display.display();
+
+    }
+  } 
+  else {
+    Serial.println(F("Failed to connect to WiFi. Please restart."));
+    display.clear();
+    display.drawString(0, 20, F("WiFi Failed"));
+    display.drawString(0, 40, F("Restarting"));
+    display.display();
+    delay(2000);
+    ESP.restart();
+  }
 
   // get frequency correction settings  
   prefs.begin(prefs_bias, PREFS_RO); 
-  for ( band=0; band<10; band++) 
+  for ( band=0; band<10; band++) { 
     biasHertz[band] = prefs.getLong(biasband[band], 0);
+    Serial.println(biasHertz[band]);
+  }
   prefs.end();
 
-  if (! calibration_mode) {
-
-    // operation mode
-
-    WiFiManager wifiMan;  // start up the wifi
-    wifiMan.setDebugOutput(false);  // true if you want send to serial debug
-    //--  wifiMan.resetSettings();  // force wifi set up portal
-    if(wifiMan.autoConnect(portalName)) {   // portal at 192.168.4.1
-      if (call_for_portal) { // user call for portal
-        // retrieve the current Wi-Fi configuration
-        wifi_config_t conf;
-        if (esp_wifi_get_config(WIFI_IF_STA, &conf) == ESP_OK) {
-          Serial.printf("SSID: %s\n", (char*)conf.sta.ssid);
-          Serial.printf("Password: %s\n", (char*)conf.sta.password);
-        } else Serial.println(F("Failed to get WiFi config"));
-        
-        // set up portal station parameters and calibration settings  
-        WiFiManagerParameter callsign(station_callsign, "Station call sign", call, sizeof(call));
-        wifiMan.addParameter(&callsign);
-
-        WiFiManagerParameter locator(station_locator, "Maidenhead grid locator", loc, sizeof(loc));
-        wifiMan.addParameter(&locator);
-
-        char buffer [11];
-        itoa(WSPR_10M_FREQ + WSPR_WNDO_CTR - biasHertz[1], buffer, 10);
-        WiFiManagerParameter bias10(biasband[1], "10M freq", buffer, 9); 
-        wifiMan.addParameter(&bias10);
-
-        itoa(WSPR_12M_FREQ + WSPR_WNDO_CTR - biasHertz[2], buffer, 10);
-        WiFiManagerParameter bias12(biasband[2], "12M freq", buffer, 9); 
-        wifiMan.addParameter(&bias12);
-
-        itoa(WSPR_15M_FREQ + WSPR_WNDO_CTR - biasHertz[3], buffer, 10);
-        WiFiManagerParameter bias15(biasband[3], "15M freq", buffer, 9);
-        wifiMan.addParameter(&bias15);
-
-        itoa(WSPR_17M_FREQ + WSPR_WNDO_CTR - biasHertz[4], buffer, 10);
-        WiFiManagerParameter bias17(biasband[4], "17M freq", buffer, 9);
-        wifiMan.addParameter(&bias17);
-
-        itoa(WSPR_20M_FREQ + WSPR_WNDO_CTR - biasHertz[5], buffer, 10);
-        WiFiManagerParameter bias20(biasband[5], "20M freq", buffer, 9);
-        wifiMan.addParameter(&bias20);
-
-        itoa(WSPR_30M_FREQ + WSPR_WNDO_CTR - biasHertz[6], buffer, 10);
-        WiFiManagerParameter bias30(biasband[6], "30M freq", buffer, 9);
-        wifiMan.addParameter(&bias30);
-
-        itoa(WSPR_40M_FREQ + WSPR_WNDO_CTR - biasHertz[7], buffer, 10);
-        WiFiManagerParameter bias40(biasband[7], "40M freq", buffer, 9);
-        wifiMan.addParameter(&bias40);
-
-        itoa(WSPR_80M_FREQ + WSPR_WNDO_CTR - biasHertz[8], buffer, 10);
-        WiFiManagerParameter bias80(biasband[8], "80M freq", buffer, 9);
-        wifiMan.addParameter(&bias80);
-
-        itoa(WSPR_160M_FREQ + WSPR_WNDO_CTR - biasHertz[9], buffer, 10);
-        WiFiManagerParameter bias160(biasband[9], "160M freq", buffer, 9);
-        wifiMan.addParameter(&bias160);
-
-        itoa(WWV_FREQ - biasHertz[0], buffer, 10);
-        WiFiManagerParameter biaswwv(biasband[0], "wwv freq", buffer, 9);  
-        wifiMan.addParameter(&biaswwv);
-
-        display.clear();
-        display.drawString(0,0,F("Portal On-Line"));
-        display.drawString(0,20,portalName);
-        display.drawString(0,40,F("192.168.4.1"));
-        display.display();
-
-        wifiMan.startConfigPortal(portalName); 
-
-        // store the user input values from portal page to prefs database
-        // station info
-        prefs.begin(prefs_station, PREFS_RW);
-        prefs.putString(station_callsign, callsign.getValue());
-        prefs.putString(station_locator, locator.getValue());
-        // reload to get any changed value(s)
-        prefs.getString(station_callsign, call, 6); 
-        prefs.getString(station_locator, loc, 4);
-        prefs.end();
-        // frequency adjustments
-        prefs.begin(prefs_bias, PREFS_RW); 
-        prefs.putLong(biasband[1], WSPR_10M_FREQ + WSPR_WNDO_CTR - atol(bias10.getValue())); // 10M
-        prefs.putLong(biasband[2], WSPR_12M_FREQ + WSPR_WNDO_CTR - atol(bias12.getValue())); // 12M
-        prefs.putLong(biasband[3], WSPR_15M_FREQ + WSPR_WNDO_CTR - atol(bias15.getValue())); // 15M
-        prefs.putLong(biasband[4], WSPR_17M_FREQ + WSPR_WNDO_CTR - atol(bias17.getValue())); // 17M
-        prefs.putLong(biasband[5], WSPR_20M_FREQ + WSPR_WNDO_CTR - atol(bias20.getValue())); // 20M
-        prefs.putLong(biasband[6], WSPR_30M_FREQ + WSPR_WNDO_CTR - atol(bias30.getValue())); // 30M
-        prefs.putLong(biasband[7], WSPR_40M_FREQ + WSPR_WNDO_CTR - atol(bias40.getValue())); // 40M
-        prefs.putLong(biasband[8], WSPR_80M_FREQ + WSPR_WNDO_CTR - atol(bias80.getValue())); // 80M
-        prefs.putLong(biasband[9], WSPR_160M_FREQ + WSPR_WNDO_CTR - atol(bias160.getValue())); // 160M
-        prefs.putLong(biasband[0], WWV_FREQ - atol(biaswwv.getValue())); // wwv
-        prefs.end();
-
-        // now load biasHertz array from pref entries
-        prefs.begin(prefs_bias, PREFS_RO);
-        for (band=0; band<10; band++) 
-          biasHertz[band] = prefs.getLong(biasband[band], 0);
-        prefs.end();
-      }
-    } 
-    else {
-      Serial.println(F("Failed to connect to WiFi. Please restart."));
-      display.clear();
-      display.drawString(0, 20, F("WiFi Failed"));
-      ESP.restart();
-    }
-
-    // start the ntp time client
-    Serial.println(F("Waiting for NTP sync"));
-    delay(10000);
-    setSyncProvider(getNtpTime);
-    setSyncInterval(300000); //bogus interval, we will reset later
-    delay(5000);
-    printTime();
-  }
-  
   // cycle the filter relays as a test
+  display.clear();
+  display.drawString(0,0,F("Relay check.."));
+  display.display();
   Serial.print(F("Testing filter relays: "));
   for (band=1; band<10; band++ )  //nine filters
   { 
     Serial.print(band);
     lowpass(band);
-    delay(1000);
+    delay(250);  // millisecs
   }
-  lowpass(-1); // disable all filters
+  lowpass(-1);  // disable all filters
   Serial.println();
 
+  if (! calibration_mode) {
+    // start the ntp time client
+    display.drawString(0,20, F("NTP sync.."));
+    display.display();
+    Serial.println(F("Waiting for NTP sync"));
+    delay(10000); 
+    setSyncProvider(getNtpTime);
+    setSyncInterval(21600); // 6-hours //300000
+    delay(5000);
+    printTime();
+  }
+  
   // Initialize the Si5351
   // Change the 2nd parameter in init if using a ref osc other than 25 MHz
   si5351.init(SI5351_CRYSTAL_LOAD_8PF, 0, 0);
@@ -345,25 +279,40 @@ void setup()
     // set initial calibration frequency
     band = 0;
     lowpass(band);
+    Serial.println("Calibration mode is active");
   }
 }
 
-
+int portal_state = PORTAL_DOWN;  // station/freq web page
+//int portal_save = -1;
+//int calibration_save = -1;
 
 /*
  *
  *    Loop 
  */
 void loop() { 
+
   if (calibration_mode) {
     /*
      * Press band button to select the next calibration band and
      * collect a list of the frequencies at the 2-second tone mark.
      * Those frequencies are to be entered into the portal fields.
      */
-    if(digitalRead(BAND_BUTTON_PIN) == LOW) {
-      delay(50);   // delay to debounce
-      if (digitalRead(BAND_BUTTON_PIN) == LOW) {
+    if (portal_state == PORTAL_UP) wifiMan.process(); // process the web page
+
+    if (portal_state == PORTAL_SAVE) {
+      portal_state = PORTAL_IDLE;
+      savePortalData();
+    }  
+
+    if (portal_state == PORTAL_DOWN) {
+      // use frequency counter or receiver to determine frequency errors
+      // write down the frequency of 2-second transmissions and
+      // enter it into web page after collection
+
+      if(digitalRead(BAND_BUTTON_PIN) == LOW) {
+        // change frequency band
         band++;
         if (band > 9) band = 0;  // rotate
         lowpass(band);           // set the band filter
@@ -374,21 +323,31 @@ void loop() {
         Serial.print(F("  Error freq: "));
         Serial.println(freqArray[band] + WSPR_WNDO_CTR - biasHertz[band]);
       }
-    }
-    setFreqbuf(freqArray[band] + WSPR_WNDO_CTR);
-    display.clear();
-    display.drawString(0, 0, F("-- CALIBRATE --"));
-    display.drawString(0, 20, freqbuf);
-    //display.drawString(0, 40, F("press BAND"));
-    display.display();
-  
-    digitalWrite(LED_PIN, HIGH);
-    calibrate(freqArray[band] + WSPR_WNDO_CTR, 2000);   //xmit no freq correction for 2 secs
-    digitalWrite(LED_PIN, LOW);
-    calibrate(freqArray[band] + WSPR_WNDO_CTR + biasHertz[band], 1000); //xmit corrected freq 1 sec
-  }
+
+      // Send calibration signals
+      setFreqbuf(freqArray[band] + WSPR_WNDO_CTR);
+
+      display.clear();
+      display.drawString(0, 0, F("-- CALIBRATE --"));
+      display.drawString(0, 20, freqbuf);
+      display.display();
+    
+      digitalWrite(LED_PIN, HIGH);
+      calibrate(freqArray[band] + WSPR_WNDO_CTR, 2000);   //xmit no freq correction for 2 secs
+      digitalWrite(LED_PIN, LOW);
+      calibrate(freqArray[band] + WSPR_WNDO_CTR + biasHertz[band], 1000); //xmit corrected freq 1 sec
+
+      if(digitalRead(PORTAL_PIN) == LOW) {
+        // user is done collecting frequency information
+        // start the station/frequency webpage portal
+        portal_state = PORTAL_UP; 
+        launchSettingsPortal();
+      }
+    } 
+  } // end calibration_mode loop
+
   else {
-    // operation mode
+    // operation mode loop
 
     if (timeStatus() == timeSet &&       // if the time is correct,
         minute() % 2 == 0 &&             // run at the top of every even minute
@@ -445,7 +404,149 @@ void loop() {
       tog = !tog;
     }
     delay(1000);
-  }
+
+  } // end operation mode loop
+}
+
+/*
+ * retrieve data from web page and store in prefs database
+ */
+void savePortalData(void) {
+
+      Serial.println(F("Saving web portal params"));
+
+      display.clear();
+      display.drawString(0, 0, F("SAVING PARAM"));
+      display.display();
+      // store the user input values from portal page to prefs database
+      // station info
+      prefs.begin(prefs_station, PREFS_RW);
+      prefs.putString(station_callsign, callsign->getValue());
+      prefs.putString(station_locator, locator->getValue());
+
+      // stop the web server
+      wifiMan.stopWebPortal();
+
+      // reload to get any changed value(s)
+      prefs.getString(station_callsign, call, 6); 
+      prefs.getString(station_locator, loc, 4);
+      prefs.end();
+
+      Serial.print(F("callsign: "));
+      Serial.print(call);
+      Serial.print(F("grid: "));
+      Serial.println(loc);
+
+      // store frequency adjustments in prefs
+      prefs.begin(prefs_bias, PREFS_RW); 
+      prefs.putLong(biasband[1], WSPR_10M_FREQ + WSPR_WNDO_CTR - atol(bias10->getValue())); // 10M
+      prefs.putLong(biasband[2], WSPR_12M_FREQ + WSPR_WNDO_CTR - atol(bias12->getValue())); // 12M
+      prefs.putLong(biasband[3], WSPR_15M_FREQ + WSPR_WNDO_CTR - atol(bias15->getValue())); // 15M
+      prefs.putLong(biasband[4], WSPR_17M_FREQ + WSPR_WNDO_CTR - atol(bias17->getValue())); // 17M
+      prefs.putLong(biasband[5], WSPR_20M_FREQ + WSPR_WNDO_CTR - atol(bias20->getValue())); // 20M
+      prefs.putLong(biasband[6], WSPR_30M_FREQ + WSPR_WNDO_CTR - atol(bias30->getValue())); // 30M
+      prefs.putLong(biasband[7], WSPR_40M_FREQ + WSPR_WNDO_CTR - atol(bias40->getValue())); // 40M
+      prefs.putLong(biasband[8], WSPR_80M_FREQ + WSPR_WNDO_CTR - atol(bias80->getValue())); // 80M
+      prefs.putLong(biasband[9], WSPR_160M_FREQ + WSPR_WNDO_CTR - atol(bias160->getValue())); // 160M
+      prefs.putLong(biasband[0], WWV_FREQ - atol(biaswwv->getValue())); // wwv
+      prefs.end();
+
+      // now load biasHertz array from pref entries
+      prefs.begin(prefs_bias, PREFS_RO);
+      for (band=0; band<10; band++) {
+        biasHertz[band] = prefs.getLong(biasband[band], 0);
+    
+        Serial.print(F("band:"));
+        Serial.print(band);
+        Serial.print(F("  bias:"));
+        Serial.println(biasHertz[band]);
+      }
+      prefs.end();
+       
+      // system restart
+      display.drawString(0, 40, F("Restarting"));
+      display.display();
+      delay(2500);
+
+      //calibration_mode = false;
+      ESP.restart();
+}    
+
+/*
+ * Set up the data configuration page then start the web server
+ */
+void launchSettingsPortal(void) {
+       
+  Serial.println(F("Bringing up the web portal"));
+
+  display.clear();
+  display.drawString(0,0,F("Portal Open"));
+  display.drawString(0,20,WiFi.localIP().toString());
+  display.display();
+
+  // set up portal station parameters and calibration settings  
+  callsign = new WiFiManagerParameter(station_callsign, "Station call sign", call, sizeof(call));
+  wifiMan.addParameter(callsign);
+
+  locator = new WiFiManagerParameter(station_locator, "Maidenhead grid locator", loc, sizeof(loc));
+  wifiMan.addParameter(locator);
+
+  char buffer [11];
+  itoa(WSPR_10M_FREQ + WSPR_WNDO_CTR - biasHertz[1], buffer, 10);
+  bias10 = new WiFiManagerParameter(biasband[1], "10M freq", buffer, 9);
+  wifiMan.addParameter(bias10);
+
+  itoa(WSPR_12M_FREQ + WSPR_WNDO_CTR - biasHertz[2], buffer, 10);
+  bias12 = new WiFiManagerParameter(biasband[2], "12M freq", buffer, 9); 
+  wifiMan.addParameter(bias12);
+
+  itoa(WSPR_15M_FREQ + WSPR_WNDO_CTR - biasHertz[3], buffer, 10);
+  bias15 = new WiFiManagerParameter(biasband[3], "15M freq", buffer, 9);
+  wifiMan.addParameter(bias15);
+
+  itoa(WSPR_17M_FREQ + WSPR_WNDO_CTR - biasHertz[4], buffer, 10);
+  bias17 = new WiFiManagerParameter(biasband[4], "17M freq", buffer, 9);
+  wifiMan.addParameter(bias17);
+
+  itoa(WSPR_20M_FREQ + WSPR_WNDO_CTR - biasHertz[5], buffer, 10);
+  bias20 = new WiFiManagerParameter(biasband[5], "20M freq", buffer, 9);
+  wifiMan.addParameter(bias20);
+
+  itoa(WSPR_30M_FREQ + WSPR_WNDO_CTR - biasHertz[6], buffer, 10);
+  bias30 = new WiFiManagerParameter(biasband[6], "30M freq", buffer, 9);
+  wifiMan.addParameter(bias30);
+
+  itoa(WSPR_40M_FREQ + WSPR_WNDO_CTR - biasHertz[7], buffer, 10);
+  bias40 = new WiFiManagerParameter(biasband[7], "40M freq", buffer, 9);
+  wifiMan.addParameter(bias40);
+
+  itoa(WSPR_80M_FREQ + WSPR_WNDO_CTR - biasHertz[8], buffer, 10);
+  bias80= new WiFiManagerParameter(biasband[8], "80M freq", buffer, 9);
+  wifiMan.addParameter(bias80);
+
+  itoa(WSPR_160M_FREQ + WSPR_WNDO_CTR - biasHertz[9], buffer, 10);
+  bias160= new WiFiManagerParameter(biasband[9], "160M freq", buffer, 9);
+  wifiMan.addParameter(bias160);
+
+  itoa(WWV_FREQ - biasHertz[0], buffer, 10);
+  biaswwv= new WiFiManagerParameter(biasband[0], "wwv freq", buffer, 9);  
+  wifiMan.addParameter(biaswwv);
+
+  // define save button event and start the server
+  wifiMan.setSaveParamsCallback(callbackSaveParams);
+  wifiMan.startWebPortal();        
+}
+
+
+/*
+ * Parameter web page callback function
+ * called when the SAVE button is clicked on the 
+ * portal parameter web page:
+ * http://<local_ip>/param
+ */
+void callbackSaveParams(void) {
+
+  portal_state = PORTAL_SAVE;     // data save is pending
 }
 
 
@@ -514,7 +615,6 @@ void getTime() {
 }
 
 void printTime() {
-  //Serial.println(String(hour()) + ":" + String(minute()) + ":" + String(second()) + " z");
   Serial.println(timebuf);
 }  
 

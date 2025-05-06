@@ -7,9 +7,11 @@
 
 How to calibrate.
 
-Hold the BAND CHANGE button while resetting device. The WSPR transmitter will go into calibration mode. Calibration announcement will show on the OLED display
+Hold the BAND CHANGE button while resetting device. The WSPR transmitter will go into calibration mode. 
+Calibration announcement will show on the OLED display
 
-The display will show a calibration frequency. On receiver, tune to that frequency. The transmitter will repeat sending 2 seconds of transmission on unbiased frequency and 1 second of biased transmission. 
+The display will show a calibration frequency. On a radio receiver, tune to that frequency. 
+The transmitter will repeat sending 2 seconds of transmission on the unbiased frequency, and 1 second of biased transmission. 
 
 Write down the zero beat frequency of the 2-second transmission.
 
@@ -18,12 +20,12 @@ Again, mark down the zero beat frequency of the 2-second transmission.
 
 Repeat for all 9 bands.
 
-Press the PORTAL button on the back panel to launch the configuration web server. 
-Go to the address shown on the display using computer browser. 
+Press the PORTAL button to launch the configuration web server. 
+Go to the address shown on the display using a computer browser. 
 Click the INFO button on the configuration page, then click the param link.
-(Alternately, go to the web address shown and add /param to the URL.)
+(Alternately, go to the web address shown and add /param to the URL)
 
-Enter the collected frequencies of the 2-second transmissions.
+Enter the collected frequencies of the 2-second transmissions into the web page.
 
 Click the SAVE button. 
 
@@ -31,7 +33,7 @@ Reboot the WSPR transmitter and again hold the BAND CHANGE button to enter confi
 
 Cycle though the bands and ensure the 1-second transmission is at exactly the frequency shown on the display.
 
-When calibration is complete, reboot. 
+When calibration is complete, reboot WSPR transmitter. 
 
-Unit is now ready for operation.
+The WSPR transmitter is now ready for operation.
 

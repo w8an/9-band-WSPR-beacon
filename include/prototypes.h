@@ -14,4 +14,4 @@ void printTime(void);
 void setFreqbuf(int);
 void initFilterPins(void);
 void lowpass(uint);            
-void blinkLed(void);              
+void blinkLed(int);              

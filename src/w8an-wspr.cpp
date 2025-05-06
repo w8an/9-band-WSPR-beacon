@@ -2,11 +2,11 @@
  * W8AN_WSPR
  *
  * Nine band WSPR transmitter with OLED display
- * Copyright (C)2024, Steven R. Stuart, W8AN
+ * Copyright (C)2024,2025 Steven R. Stuart, W8AN
  * ----------------------------------------------------------------------------
  * Nine band WSPR beacon for Espressif ESP32 using the Silicon Labs Si5351A clock 
  * generator and nine QRP Labs low pass filter kits installed in two of their 
- * Ultimate relay-switched LPF kits.
+ * Ultimate Relay-Switched LPF kits.
  *
  * WiFi parameters, WSPR station information and Si5351A frequency calibration are 
  * entered via a wifi device (phone, laptop, etc.) into a web page which is
@@ -106,16 +106,17 @@ unsigned long freq;
 char call[7] = "NOCALL";   // maximum 6 character station call sign
 char loc[5] = "AA00";      // station maidenhead grid position (4 chars)
 char timebuf[12], freqbuf[16];
-uint8_t dbm = 3;   // 2.1mW Calculated from observed output (0.92mV p-p @ 50 ohm)
+uint8_t dbm = 3;     // actual 2.33 dBm (1.7mW) calculated from observed output (9.2mV p-p @ 50 ohm)
 uint8_t tx_buffer[255];
-bool call_wifi_portal = false;
-bool calibration_mode = false;     // calibration transmit mode
+bool calibration_mode = false;   // calibration transmit mode
+int portal_state = PORTAL_DOWN;  // op state of web portal
 
 // wifi and web portal objects
 WiFiManager wifiMan; 
-WiFiManagerParameter *callsign, *locator;
-WiFiManagerParameter *bias10, *bias12, *bias15, *bias17, *bias20;
-WiFiManagerParameter *bias30, *bias40, *bias80, *bias160, *biaswwv;
+WiFiManagerParameter *callsign, *locator, \
+  *bias10, *bias12, *bias15, *bias17, *bias20, \
+  *bias30, *bias40, *bias80, *bias160, *biaswwv;
+
 
 /*
  *
@@ -124,7 +125,7 @@ WiFiManagerParameter *bias30, *bias40, *bias80, *bias160, *biaswwv;
 void setup()
 {
   pinMode(LED_PIN, OUTPUT);                // "On the Air" indicator.
-  blinkLed();                              // system starting indicator
+  blinkLed(3);                             // system starting indicator
   pinMode(PORTAL_PIN, INPUT_PULLUP);       // call for web portal
   pinMode(BAND_BUTTON_PIN, INPUT_PULLUP);  // call for calibration mode
   initFilterPins();                        // set up low pass filter pins
@@ -135,8 +136,8 @@ void setup()
   Serial.println(F("="));
   if( digitalRead(PORTAL_PIN) == LOW ) {
     // hold the portal button on boot to launch web configuration
-    call_wifi_portal = true;
     Serial.println(F("==> WIFI CONFIGURATION PORTAL"));
+    wifiMan.startConfigPortal(portalName); 
   }
   else { 
     // hold the band button on boot to launch calibration mode 
@@ -197,21 +198,18 @@ void setup()
   wifiMan.setDebugOutput(false);   // true if you want send to serial debug 
   //--  wifiMan.resetSettings();  // force wifi set up portal
   if(wifiMan.autoConnect(portalName)) {   // portal at 192.168.4.1
-    if (call_wifi_portal) { // user call for wifi config portal
-      // retrieve the current Wi-Fi configuration
-      wifi_config_t conf;
-      if (esp_wifi_get_config(WIFI_IF_STA, &conf) == ESP_OK) {
-        Serial.printf("SSID: %s\n", (char*)conf.sta.ssid);
-        Serial.printf("Password: %s\n", (char*)conf.sta.password);
-      } else Serial.println(F("Failed to get WiFi config"));
-      
-      display.clear();
-      display.drawString(0,0,F("Config Portal"));
-      display.drawString(0,20,portalName);
-      display.drawString(0,40,F("192.168.4.1"));
-      display.display();
-
-    }
+    // retrieve the current Wi-Fi configuration
+    wifi_config_t conf;
+    if (esp_wifi_get_config(WIFI_IF_STA, &conf) == ESP_OK) {
+      Serial.printf("SSID: %s\n", (char*)conf.sta.ssid);
+      Serial.printf("Password: %s\n", (char*)conf.sta.password);
+    } else Serial.println(F("Failed to get WiFi config"));
+    
+    display.clear();
+    display.drawString(0,0,F("Config Portal"));
+    display.drawString(0,20,portalName);
+    display.drawString(0,40,F("192.168.4.1"));
+    display.display();
   } 
   else {
     Serial.println(F("Failed to connect to WiFi. Please restart."));
@@ -283,9 +281,6 @@ void setup()
   }
 }
 
-int portal_state = PORTAL_DOWN;  // station/freq web page
-//int portal_save = -1;
-//int calibration_save = -1;
 
 /*
  *
@@ -295,9 +290,7 @@ void loop() {
 
   if (calibration_mode) {
     /*
-     * Press band button to select the next calibration band and
-     * collect a list of the frequencies at the 2-second tone mark.
-     * Those frequencies are to be entered into the portal fields.
+     * Press band button upon boot-up to enable calibration mode
      */
     if (portal_state == PORTAL_UP) wifiMan.process(); // process the web page
 
@@ -308,8 +301,8 @@ void loop() {
 
     if (portal_state == PORTAL_DOWN) {
       // use frequency counter or receiver to determine frequency errors
-      // write down the frequency of 2-second transmissions and
-      // enter it into web page after collection
+      // write down the frequency of the 2-second transmissions and
+      // enter them into portal web page after collection
 
       if(digitalRead(BAND_BUTTON_PIN) == LOW) {
         // change frequency band
@@ -413,63 +406,63 @@ void loop() {
  */
 void savePortalData(void) {
 
-      Serial.println(F("Saving web portal params"));
+  Serial.println(F("Saving web portal params"));
 
-      display.clear();
-      display.drawString(0, 0, F("SAVING PARAM"));
-      display.display();
-      // store the user input values from portal page to prefs database
-      // station info
-      prefs.begin(prefs_station, PREFS_RW);
-      prefs.putString(station_callsign, callsign->getValue());
-      prefs.putString(station_locator, locator->getValue());
+  display.clear();
+  display.drawString(0, 0, F("SAVING PARAM"));
+  display.display();
+  // store the user input values from portal page to prefs database
+  // station info
+  prefs.begin(prefs_station, PREFS_RW);
+  prefs.putString(station_callsign, callsign->getValue());
+  prefs.putString(station_locator, locator->getValue());
 
-      // stop the web server
-      wifiMan.stopWebPortal();
+  // stop the web server
+  wifiMan.stopWebPortal();
 
-      // reload to get any changed value(s)
-      prefs.getString(station_callsign, call, 6); 
-      prefs.getString(station_locator, loc, 4);
-      prefs.end();
+  // reload to get any changed value(s)
+  prefs.getString(station_callsign, call, 6); 
+  prefs.getString(station_locator, loc, 4);
+  prefs.end();
 
-      Serial.print(F("callsign: "));
-      Serial.print(call);
-      Serial.print(F("grid: "));
-      Serial.println(loc);
+  Serial.print(F("callsign: "));
+  Serial.print(call);
+  Serial.print(F("grid: "));
+  Serial.println(loc);
 
-      // store frequency adjustments in prefs
-      prefs.begin(prefs_bias, PREFS_RW); 
-      prefs.putLong(biasband[1], WSPR_10M_FREQ + WSPR_WNDO_CTR - atol(bias10->getValue())); // 10M
-      prefs.putLong(biasband[2], WSPR_12M_FREQ + WSPR_WNDO_CTR - atol(bias12->getValue())); // 12M
-      prefs.putLong(biasband[3], WSPR_15M_FREQ + WSPR_WNDO_CTR - atol(bias15->getValue())); // 15M
-      prefs.putLong(biasband[4], WSPR_17M_FREQ + WSPR_WNDO_CTR - atol(bias17->getValue())); // 17M
-      prefs.putLong(biasband[5], WSPR_20M_FREQ + WSPR_WNDO_CTR - atol(bias20->getValue())); // 20M
-      prefs.putLong(biasband[6], WSPR_30M_FREQ + WSPR_WNDO_CTR - atol(bias30->getValue())); // 30M
-      prefs.putLong(biasband[7], WSPR_40M_FREQ + WSPR_WNDO_CTR - atol(bias40->getValue())); // 40M
-      prefs.putLong(biasband[8], WSPR_80M_FREQ + WSPR_WNDO_CTR - atol(bias80->getValue())); // 80M
-      prefs.putLong(biasband[9], WSPR_160M_FREQ + WSPR_WNDO_CTR - atol(bias160->getValue())); // 160M
-      prefs.putLong(biasband[0], WWV_FREQ - atol(biaswwv->getValue())); // wwv
-      prefs.end();
+  // store frequency adjustments in prefs
+  prefs.begin(prefs_bias, PREFS_RW); 
+  prefs.putLong(biasband[1], WSPR_10M_FREQ + WSPR_WNDO_CTR - atol(bias10->getValue())); // 10M
+  prefs.putLong(biasband[2], WSPR_12M_FREQ + WSPR_WNDO_CTR - atol(bias12->getValue())); // 12M
+  prefs.putLong(biasband[3], WSPR_15M_FREQ + WSPR_WNDO_CTR - atol(bias15->getValue())); // 15M
+  prefs.putLong(biasband[4], WSPR_17M_FREQ + WSPR_WNDO_CTR - atol(bias17->getValue())); // 17M
+  prefs.putLong(biasband[5], WSPR_20M_FREQ + WSPR_WNDO_CTR - atol(bias20->getValue())); // 20M
+  prefs.putLong(biasband[6], WSPR_30M_FREQ + WSPR_WNDO_CTR - atol(bias30->getValue())); // 30M
+  prefs.putLong(biasband[7], WSPR_40M_FREQ + WSPR_WNDO_CTR - atol(bias40->getValue())); // 40M
+  prefs.putLong(biasband[8], WSPR_80M_FREQ + WSPR_WNDO_CTR - atol(bias80->getValue())); // 80M
+  prefs.putLong(biasband[9], WSPR_160M_FREQ + WSPR_WNDO_CTR - atol(bias160->getValue())); // 160M
+  prefs.putLong(biasband[0], WWV_FREQ - atol(biaswwv->getValue())); // wwv
+  prefs.end();
 
-      // now load biasHertz array from pref entries
-      prefs.begin(prefs_bias, PREFS_RO);
-      for (band=0; band<10; band++) {
-        biasHertz[band] = prefs.getLong(biasband[band], 0);
+  // now load biasHertz array from pref entries
+  prefs.begin(prefs_bias, PREFS_RO);
+  for (band=0; band<10; band++) {
+    biasHertz[band] = prefs.getLong(biasband[band], 0);
+
+    Serial.print(F("band:"));
+    Serial.print(band);
+    Serial.print(F("  bias:"));
+    Serial.println(biasHertz[band]);
+  }
+  prefs.end();
     
-        Serial.print(F("band:"));
-        Serial.print(band);
-        Serial.print(F("  bias:"));
-        Serial.println(biasHertz[band]);
-      }
-      prefs.end();
-       
-      // system restart
-      display.drawString(0, 40, F("Restarting"));
-      display.display();
-      delay(2500);
+  // system restart
+  display.drawString(0, 40, F("Restarting"));
+  display.display();
+  delay(2500);
 
-      //calibration_mode = false;
-      ESP.restart();
+  //calibration_mode = false;
+  ESP.restart();
 }    
 
 /*
@@ -537,7 +530,6 @@ void launchSettingsPortal(void) {
   wifiMan.startWebPortal();        
 }
 
-
 /*
  * Parameter web page callback function
  * called when the SAVE button is clicked on the 
@@ -548,7 +540,6 @@ void callbackSaveParams(void) {
 
   portal_state = PORTAL_SAVE;     // data save is pending
 }
-
 
 void encode(unsigned long xfreq) {
 
@@ -701,9 +692,9 @@ time_t getNtpTime() {
   return 0; // return 0 when unable to get the time
 }
 
-void blinkLed() { 
-  // 3 blinks
-  for(int i = 0; i<3; i++) {
+void blinkLed(int count) { 
+  // flash LED <count> times
+  for(int i = 0; i<count; i++) {
       digitalWrite(LED_PIN, HIGH);
       delay(200);
       digitalWrite(LED_PIN, LOW);
@@ -711,23 +702,24 @@ void blinkLed() {
   }
 }
 
-// Permission is hereby granted, free of charge, to any person obtaining
-// a copy of this software and associated documentation files (the
-// "Software"), to deal in the Software without restriction, including
-// without limitation the rights to use, copy, modify, merge, publish,
-// distribute, sublicense, and/or sell copies of the Software, and to
-// permit persons to whom the Software is furnished to do so, subject
-// to the following conditions:
-//
-// The above copyright notice and this permission notice shall be
-// included in all copies or substantial portions of the Software.
-//
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
-// EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
-// MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
-// IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR
-// ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF
-// CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
-// WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
-//
+/*
+ * Permission is hereby granted, free of charge, to any person obtaining
+ * a copy of this software and associated documentation files (the
+ * "Software"), to deal in the Software without restriction, including
+ * without limitation the rights to use, copy, modify, merge, publish,
+ * distribute, sublicense, and/or sell copies of the Software, and to
+ * permit persons to whom the Software is furnished to do so, subject
+ * to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be
+ * included in all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+ * IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR
+ * ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF
+ * CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+ * WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ */
 // eof

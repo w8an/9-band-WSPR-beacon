@@ -80,6 +80,7 @@ const char* portalName = "WSPR-PORTAL";    // portal ssid
 const char* prefs_station = "station";     // general purpose namespace in prefs
 const char* station_callsign = "callsign"; // prefs station key name
 const char* station_locator = "locator";   // prefs locator key name
+const char* clock_port = "clkport";        // SI5351 module output port (0,1,2)
 const char* prefs_bias = "bias";           // frequency bias values namespace
 const char biasband[10][5] =               // prefs_bias keys
   {"wwv", "10m", "12m", "15m", "17m", "20m", "30m", "40m", "80m", "160m"};
@@ -101,21 +102,23 @@ byte packetBuffer[NTP_PACKET_SIZE]; //buffer to hold incoming & outgoing packets
 
 // global variables
 int band = 0;
-bool tog = false;    // used to toggle oled data page
+bool tog = false;                // used to toggle oled data page
 unsigned long freq;
-char call[7] = "NOCALL";   // maximum 6 character station call sign
-char loc[5] = "AA00";      // station maidenhead grid position (4 chars)
-char timebuf[12], freqbuf[16];
+char call[7] = "NOCALL";         // maximum 6 character station call sign
+char loc[5] = "AA00";            // station maidenhead grid position (4 chars)
+char timebuf[12], freqbuf[16];   // text buffers
+int si_clock = SI5351_CLK0;        // si5351 clock port (0,1,2)
 uint8_t dbm = 3;     // actual 2.33 dBm (1.7mW) calculated from observed output (9.2mV p-p @ 50 ohm)
-uint8_t tx_buffer[255];
+uint8_t tx_buffer[255];  
 bool calibration_mode = false;   // calibration transmit mode
 int portal_state = PORTAL_DOWN;  // op state of web portal
 
 // wifi and web portal objects
 WiFiManager wifiMan; 
-WiFiManagerParameter *callsign, *locator, \
+WiFiManagerParameter *callsign, *locator, *clkport, \
   *bias10, *bias12, *bias15, *bias17, *bias20, \
   *bias30, *bias40, *bias80, *bias160, *biaswwv;
+
 
 
 /*
@@ -153,6 +156,7 @@ void setup()
   prefs.begin(prefs_station, PREFS_RO);
   prefs.getString(station_callsign, call, sizeof(call));
   prefs.getString(station_locator,  loc,  sizeof(loc));
+  si_clock = prefs.getInt(clock_port);
   prefs.end();
 
   // sign on
@@ -169,6 +173,8 @@ void setup()
   Serial.println(call);
   Serial.print("Grid   : ");
   Serial.println(loc);
+  Serial.print("SI Port: ");
+  Serial.println(si_clock);
   Serial.println();
 
   // start up the oled display
@@ -202,14 +208,8 @@ void setup()
     wifi_config_t conf;
     if (esp_wifi_get_config(WIFI_IF_STA, &conf) == ESP_OK) {
       Serial.printf("SSID: %s\n", (char*)conf.sta.ssid);
-      Serial.printf("Password: %s\n", (char*)conf.sta.password);
+      //Serial.printf("Password: %s\n", (char*)conf.sta.password);
     } else Serial.println(F("Failed to get WiFi config"));
-    
-    display.clear();
-    display.drawString(0,0,F("Config Portal"));
-    display.drawString(0,20,portalName);
-    display.drawString(0,40,F("192.168.4.1"));
-    display.display();
   } 
   else {
     Serial.println(F("Failed to connect to WiFi. Please restart."));
@@ -255,14 +255,16 @@ void setup()
     printTime();
   }
   
+  //si_clock = (int)SI5351_CLK1;
+  
   // Initialize the Si5351
   // Change the 2nd parameter in init if using a ref osc other than 25 MHz
   si5351.init(SI5351_CRYSTAL_LOAD_8PF, 0, 0);
 
-  // Set CLK0 output (power level: SSI5351_DRIVE_2MA, _4MA, _6MA, _8MA) 
-  if (calibration_mode) si5351.drive_strength(SI5351_CLK0, SI5351_DRIVE_2MA);
-  else si5351.drive_strength(SI5351_CLK0, SI5351_DRIVE_8MA);
-  si5351.output_enable(SI5351_CLK0, 0); // Disable the clock initially
+  // Set CLK output (power level: SSI5351_DRIVE_2MA, _4MA, _6MA, _8MA) 
+  if (calibration_mode) si5351.drive_strength((si5351_clock)si_clock, SI5351_DRIVE_2MA);
+  else si5351.drive_strength((si5351_clock)si_clock, SI5351_DRIVE_8MA);
+  si5351.output_enable((si5351_clock)si_clock, 0); // Disable the clock initially
 
   // get the si5351 frequency adjustments
   prefs.begin(prefs_bias, PREFS_RO); // load biasHertz array from pref entries
@@ -416,6 +418,7 @@ void savePortalData(void) {
   prefs.begin(prefs_station, PREFS_RW);
   prefs.putString(station_callsign, callsign->getValue());
   prefs.putString(station_locator, locator->getValue());
+  prefs.putInt(clock_port, atoi(clkport->getValue()));
 
   // stop the web server
   wifiMan.stopWebPortal();
@@ -423,12 +426,15 @@ void savePortalData(void) {
   // reload to get any changed value(s)
   prefs.getString(station_callsign, call, 6); 
   prefs.getString(station_locator, loc, 4);
+  si_clock = prefs.getInt(clock_port);
   prefs.end();
 
   Serial.print(F("callsign: "));
   Serial.print(call);
   Serial.print(F("grid: "));
   Serial.println(loc);
+  Serial.print(F("si5351 port: "));
+  Serial.println(si_clock);
 
   // store frequency adjustments in prefs
   prefs.begin(prefs_bias, PREFS_RW); 
@@ -485,6 +491,10 @@ void launchSettingsPortal(void) {
   wifiMan.addParameter(locator);
 
   char buffer [11];
+  itoa(si_clock, buffer, 10);
+  clkport = new WiFiManagerParameter(clock_port, "SI5351 Port (0,1,2)", buffer, 2);
+  wifiMan.addParameter(clkport);
+
   itoa(WSPR_10M_FREQ + WSPR_WNDO_CTR - biasHertz[1], buffer, 10);
   bias10 = new WiFiManagerParameter(biasband[1], "10M freq", buffer, 9);
   wifiMan.addParameter(bias10);
@@ -547,16 +557,16 @@ void encode(unsigned long xfreq) {
 
   // Reset the tone to the base frequency and turn on the output
   digitalWrite(LED_PIN, HIGH); // on-the-air indicator
-  si5351.output_enable(SI5351_CLK0, 1);
+  si5351.output_enable((si5351_clock)si_clock, 1);
 
   // Loop through the string, transmitting one character at a time.
   for(i = 0; i < WSPR_SYMBOL_COUNT; i++) { // WSPR_ consts are from the JTEncode lib
-    si5351.set_freq((xfreq * 100) + (tx_buffer[i] * WSPR_TONE_SPACING), SI5351_CLK0);
+    si5351.set_freq((xfreq * 100) + (tx_buffer[i] * WSPR_TONE_SPACING), (si5351_clock)si_clock);
     delay(WSPR_DELAY);
   }
 
   // Turn off the output
-  si5351.output_enable(SI5351_CLK0, 0);
+  si5351.output_enable((si5351_clock)si_clock, 0);
   digitalWrite(LED_PIN, LOW);
 }
 
@@ -565,10 +575,10 @@ void calibrate(unsigned long calfreq, int xtime) {
   uint8_t i;
 
   // Reset the tone to the base frequency and turn on the output
-  si5351.set_freq(calfreq * 100, SI5351_CLK0);
-  si5351.output_enable(SI5351_CLK0, 1); // transmit on
+  si5351.set_freq(calfreq * 100, (si5351_clock)si_clock);
+  si5351.output_enable((si5351_clock)si_clock, 1); // transmit on
   delay(xtime);  // transmission time in ms
-  si5351.output_enable(SI5351_CLK0, 0); // transmit off
+  si5351.output_enable((si5351_clock)si_clock, 0); // transmit off
 }
 
 void set_tx_buffer() {
